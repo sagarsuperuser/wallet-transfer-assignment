@@ -360,9 +360,20 @@ transfers by outcome, replay rate, and lock-timeout rate.
 
 Integration tests run against a **real PostgreSQL**. The database is never
 mocked: a mocked query passes happily while the SQL underneath it is wrong, and
-the SQL is where every guarantee in this document actually lives. Tests skip
-when `TEST_DATABASE_URL` is unset, so `go test ./...` works without a database;
-CI starts one and sets it.
+the SQL is where every guarantee in this document actually lives.
+
+A missing database is a convenience locally and a failure in CI. With
+`TEST_DATABASE_URL` unset, `go test ./...` skips the integration tests and
+passes, so a fresh clone gives a clear message rather than a dozen connection
+errors. With `CI` set — which GitHub Actions does automatically — the same
+condition fails instead, because a skipped test and a passing test are both
+green and a pipeline that silently stopped exercising the SQL would report
+success while testing nothing. The workflow fails too if Postgres cannot start.
+
+The rule those two enforce together: **absence of a test result is a failure in
+CI and a convenience locally.** The check lives in the test fixture as well as
+the workflow so it holds however CI is wired — a later edit to `ci.yml` cannot
+quietly disable these tests without the suite objecting.
 
 Wallets are seeded by a test helper inserting rows directly, since no endpoint
 creates them. Each test works on its own wallet ids so tests do not interfere.

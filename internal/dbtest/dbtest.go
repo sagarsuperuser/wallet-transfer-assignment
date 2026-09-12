@@ -21,13 +21,25 @@ import (
 var migrateOnce sync.Once
 
 // Pool connects to the database named by TEST_DATABASE_URL and ensures the
-// schema is applied. Tests skip when the variable is unset, so `go test ./...`
-// works on a machine with no database; CI starts one and sets it.
+// schema is applied.
+//
+// A missing database is a convenience locally and a failure in CI. On a
+// developer machine `go test ./...` should say "skipped, no database" rather
+// than produce a dozen connection errors; in CI a green build has to mean the
+// integration tests actually ran, because a skipped test and a passing test
+// otherwise look identical and coverage can silently fall to zero.
+//
+// The check lives here rather than only in the workflow so that it holds however
+// CI is wired: a later edit to ci.yml cannot quietly disable these tests without
+// the suite objecting.
 func Pool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("TEST_DATABASE_URL is not set in CI; integration tests must not be skipped")
+		}
 		t.Skip("TEST_DATABASE_URL is not set; skipping integration test")
 	}
 
