@@ -231,6 +231,31 @@ attempt created nothing, so there is no prior result to be idempotent about.
 Validation failures behave the same way — they are rejected before any database
 work.
 
+**Only one wallet is named when both are missing.** PostgreSQL validates the two
+foreign keys in declaration order and stops at the first violation, so a request
+naming two unknown wallets is blamed on `fromWalletId` alone — verified against a
+live database, which reports `transfers_from_wallet_fk`. The caller fixes that
+one, retries, and only then learns the destination is also unknown. Reporting
+both at once would need a pre-flight
+`SELECT id FROM wallets WHERE id = ANY($1)` before the claim: one extra
+non-locking read, with the foreign key still behind it as the backstop. Not done
+here, because a request naming two unknown wallets is a caller bug, and two round
+trips to discover it is a fair price for keeping the existence check in exactly
+one place.
+
+**A replay never reaches the foreign key.** `ON CONFLICT DO NOTHING` inserts no
+row when the key is already held, and foreign keys are validated only on an
+actual insert — also verified. So replaying a known key with a nonexistent wallet
+id produces no `404`. It takes the ordinary replay path, and because wallet ids
+are part of `request_hash`, the mismatch returns **`409`** instead.
+
+That is the better answer: the key is already bound to a real transfer, so "this
+key was used with different parameters" describes the problem more precisely than
+"that wallet does not exist", and the stored transfer is what the caller is
+actually in conflict with. The consequence to be aware of is that `404` and `409`
+are not interchangeable probes for the same condition — which one an unknown
+wallet produces depends on whether the idempotency key was free.
+
 ## Failure modes
 
 | Failure | Behaviour |
@@ -240,7 +265,8 @@ work.
 | Response lost after commit | Retry replays the committed transfer — the reason the key is claimed in the same transaction that moves the money |
 | Process crashes mid-transfer | Transaction rolls back; key unclaimed; no partial ledger; safe to retry |
 | Insufficient funds | `FAILED` committed, `422`, no money moved, same answer on every replay |
-| Unknown wallet | `404`; nothing written |
+| Unknown wallet, key free | `404`; nothing written, key left unclaimed. If both wallets are unknown only `fromWalletId` is named |
+| Unknown wallet, key already held | `409` — the claim inserts no row, so the foreign key is never validated and the hash mismatch answers first |
 | Concurrent debits of one wallet | Serialised by `FOR UPDATE`; the second sees the first's balance |
 | Contention exceeds `lock_timeout` | `55P03` → `503`; safe to retry unchanged |
 | Overdraft attempted despite the check | `CHECK (balance >= 0)` aborts the transaction → `500`. Unreachable by design; the constraint exists so a logic bug corrupts nothing |
@@ -315,6 +341,8 @@ Behaviour covered:
 - duplicate key, different parameters: `409`, stored transfer untouched
 - insufficient funds: `FAILED` committed, no money moved, replay returns `422`
 - unknown wallet: `404`, nothing written, key left unclaimed
+- known key naming an unknown wallet: `409` rather than `404`, since the
+  claim never reaches the foreign key
 - concurrent debits of one wallet: no double spend, no negative balance
 - invariant: every wallet's stored balance equals the sum of its ledger entries
 
