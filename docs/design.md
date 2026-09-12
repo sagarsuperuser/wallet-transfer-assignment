@@ -315,7 +315,14 @@ failed. Retrying the *intent* requires a new key.
 `wallets` and `transfers` are reached by primary key, and `transfers` also by
 `idempotency_key`, which its `UNIQUE` constraint already indexes.
 `UNIQUE (transfer_id, type)` on `ledger_entries` doubles as the index for
-reading a transfer's entries. The single explicit secondary index is
+reading a transfer's entries: PostgreSQL implements a unique constraint as a
+B-tree index, and a B-tree on `(transfer_id, type)` serves a lookup on
+`transfer_id` alone, so no separate index is needed. Verified with `EXPLAIN` over
+10,000 entries — a single transfer's pair is found by index scan, not by
+scanning the table. This is a property of any unique constraint leading with
+`transfer_id`, not a benefit of choosing `(transfer_id, type)` over a wider key;
+that choice is justified by correctness alone, since a key including
+`wallet_id` would permit two `DEBIT` rows on one transfer. The single explicit secondary index is
 `(wallet_id, id)` on `ledger_entries`, for per-wallet reads and for the test
 asserting stored balance equals the sum of a wallet's entries.
 
