@@ -35,6 +35,11 @@ var (
 	// parameters than it was first used with.
 	ErrIdempotencyKeyConflict = errors.New("idempotency key already used with different parameters")
 
+	// ErrWalletBusy reports that a wallet's row was locked by another transfer
+	// for longer than the service is willing to wait. The request never
+	// started, so retrying it unchanged is safe.
+	ErrWalletBusy = errors.New("wallet is busy; retry the request")
+
 	// ErrInvalidStateTransition reports an attempt to move a transfer out of a
 	// state it is not in. It should be unreachable: every transition is guarded
 	// in SQL as well, and it exists so a logic bug surfaces as an error rather

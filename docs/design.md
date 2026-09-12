@@ -179,11 +179,16 @@ guarantee the locks already provide.
    SELECT balance FROM wallets WHERE id = $1 FOR UPDATE;
    ```
    Separate statements rather than one `WHERE id IN (...) ORDER BY id`: a single
-   statement almost certainly locks in sorted order, but that depends on the
-   query plan, and it cannot report *which* wallet was missing. Two statements
-   make both properties obvious without an argument about planner behaviour.
-   Consistent ordering is what prevents two opposing transfers between the same
+   statement almost certainly locks in sorted order, but only because the plan
+   happens to sort before locking, which is a property of the planner rather
+   than of the query. Two statements make the ordering a property of the code,
+   and consistent ordering is what stops two opposing transfers between the same
    pair from deadlocking.
+
+   Both wallets are guaranteed to exist by this point — the claim in step 1
+   carries foreign keys, so an unknown wallet has already aborted the
+   transaction, and neither row can vanish underneath us while the transfer
+   references it. A missing row here would be a bug, not a 404.
 3. **Check sufficiency.** Short → mark `FAILED` with a reason, **commit**, return
    `422`.
 4. **Move the money**, relative rather than absolute:
