@@ -96,9 +96,11 @@ func (t *Tx) TransferByIdempotencyKey(ctx context.Context, key string) (domain.T
 // MarkTransferProcessed records a transfer as settled.
 //
 // The WHERE clause guards the transition in SQL as well as in the domain, so a
-// transfer cannot be settled twice even if two code paths tried. Today that is
-// unreachable — the transition commits in the transaction that created the row
-// — and it is kept as an assertion that the state machine is real.
+// transfer cannot be settled twice even if two code paths tried. The guard does
+// not fire in the current flow: the transition commits in the transaction that
+// created the row, and no other transaction can see that row beforehand. It is
+// defence in depth against a retry loop or a background worker added later,
+// which could otherwise settle a transfer twice unnoticed.
 func (t *Tx) MarkTransferProcessed(ctx context.Context, transferID string) error {
 	const query = `
 		UPDATE transfers
@@ -122,6 +124,13 @@ func (t *Tx) MarkTransferFailed(ctx context.Context, transferID, reason string) 
 	return t.transition(ctx, query, transferID, reason)
 }
 
+// transition runs a guarded state change and reports a row count other than one
+// as an invalid transition.
+//
+// That conflates two causes: the transfer was not PENDING, and no transfer with
+// this id exists. Both are programming errors rather than runtime conditions, so
+// they are not told apart; separating them would cost a query for a case that
+// cannot occur.
 func (t *Tx) transition(ctx context.Context, query, transferID string, args ...any) error {
 	tag, err := t.tx.Exec(ctx, query, append([]any{transferID}, args...)...)
 	if err != nil {

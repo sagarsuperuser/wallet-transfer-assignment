@@ -214,8 +214,25 @@ limitation.
 `PENDING` therefore never escapes the transaction. It is not decorative: it is
 the state in which the key is claimed but the money has not moved, and it is the
 row that would survive if this ever became a two-phase or asynchronous transfer.
-Its guarded transition (`WHERE id = $1 AND state = 'PENDING'`) cannot fail today,
-and is kept as an assertion that the state machine is real.
+
+The transition out of it is guarded in SQL as well as in the domain —
+`WHERE id = $1 AND state = 'PENDING'`, with a zero row count treated as an
+error. **In the flow above that guard never fires.** The service settles each
+transfer exactly once, inside the transaction that created the row, and no other
+transaction can see that row before it commits, let alone change its state. So
+the guard is defence in depth rather than a live check.
+
+It is kept because it costs one clause and it is the difference between a double
+settlement being impossible and being merely unlikely. Nothing in the current
+flow calls a transition twice; a retry loop, a second code path, or a background
+worker added later might, and the guard means such a change cannot silently
+settle a transfer twice or overwrite a recorded failure. The repository test
+settles a transfer twice on purpose to confirm the second attempt is refused.
+
+One imprecision to be aware of: a zero row count is reported as an invalid state
+transition, which also covers a transfer id that does not exist at all. Both are
+programming errors rather than runtime conditions, so they are not told apart —
+distinguishing them would cost an extra query for a case that cannot occur.
 
 ### Wallet existence
 
