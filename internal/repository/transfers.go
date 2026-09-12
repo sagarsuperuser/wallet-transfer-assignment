@@ -99,8 +99,11 @@ func (t *Tx) TransferByIdempotencyKey(ctx context.Context, key string) (domain.T
 // transfer cannot be settled twice even if two code paths tried. The guard does
 // not fire in the current flow: the transition commits in the transaction that
 // created the row, and no other transaction can see that row beforehand. It is
-// defence in depth against a retry loop or a background worker added later,
-// which could otherwise settle a transfer twice unnoticed.
+// defence in depth for the day a PENDING row is committed and left for
+// something else to finish — an asynchronous flow, or a reconciler sweeping
+// WHERE state = 'PENDING' — when two actors could otherwise settle the same
+// transfer. Retrying a whole request is not that case: the claim conflicts on
+// the idempotency key and never reaches this statement.
 func (t *Tx) MarkTransferProcessed(ctx context.Context, transferID string) error {
 	const query = `
 		UPDATE transfers

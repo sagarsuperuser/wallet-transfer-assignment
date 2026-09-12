@@ -222,12 +222,21 @@ transfer exactly once, inside the transaction that created the row, and no other
 transaction can see that row before it commits, let alone change its state. So
 the guard is defence in depth rather than a live check.
 
-It is kept because it costs one clause and it is the difference between a double
-settlement being impossible and being merely unlikely. Nothing in the current
-flow calls a transition twice; a retry loop, a second code path, or a background
-worker added later might, and the guard means such a change cannot silently
-settle a transfer twice or overwrite a recorded failure. The repository test
-settles a transfer twice on purpose to confirm the second attempt is refused.
+It is kept because it costs one clause and the condition that makes it necessary
+is one design change away. Today `PENDING` exists only inside the transaction
+that creates it, so nothing else can reach the row. The moment a `PENDING` row is
+committed and left for something else to finish — an asynchronous transfer, a
+two-phase flow, a reconciler sweeping `WHERE state = 'PENDING'` — two actors can
+select the same transfer, and the guard is what lets only one of them settle it.
+
+Retrying the whole request is **not** that case, and it is worth being clear
+about why: a retry re-runs the claim, which conflicts on the idempotency key and
+returns the stored transfer, so the unique constraint answers first and the guard
+is never reached. The guard covers the narrower case of two settlements of a
+transfer that is already claimed.
+
+The repository test settles a transfer twice on purpose to confirm the second
+attempt is refused.
 
 One imprecision to be aware of: a zero row count is reported as an invalid state
 transition, which also covers a transfer id that does not exist at all. Both are
