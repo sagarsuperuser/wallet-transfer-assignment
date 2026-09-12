@@ -1,0 +1,325 @@
+# Wallet Transfer Service — design note
+
+Written before the implementation, per the documentation-first workflow in
+[ASSIGNMENT.md](../ASSIGNMENT.md). It records the contract, the failure modes,
+and the decisions that are easy to get wrong and expensive to change later.
+
+## Problem
+
+Move money between two wallets such that the transfer is atomic, recorded as a
+balanced double-entry pair, safe under concurrent debits of the same wallet, and
+**exactly-once at the API level** when the caller supplies an `idempotencyKey`.
+
+The hard part is not the arithmetic. It is that the caller may send the same
+request twice, the network may lose a response after the money has already
+moved, and two requests may race for the same balance. Each of those has to
+produce one and only one transfer.
+
+## Scope
+
+In scope: `POST /transfers`, wallet balances, the double-entry ledger, the
+transfer state machine, idempotent replay.
+
+Explicitly **out of scope**, as optional enhancements in the brief:
+
+| Not building | Why it matters here |
+|---|---|
+| Wallet balance API (`GET /wallets/{id}`) | No read path by wallet, so no index for one |
+| Transfer history API | Same; see [Indexes](#indexes) |
+| Authentication / multi-tenancy | Determines the idempotency key namespace; see below |
+| Reversals, refunds, multi-currency, partial transfers | Each changes the ledger model |
+| Metrics, tracing | Logging only; see [Observability](#observability) |
+
+Wallets are assumed to already exist. Nothing in scope creates one, so wallets
+are seeded directly (see [Testing](#testing)).
+
+## API contract
+
+### Request
+
+```http
+POST /transfers
+Content-Type: application/json
+```
+
+```json
+{
+  "idempotencyKey": "abc123",
+  "fromWalletId": "wallet_1",
+  "toWalletId": "wallet_2",
+  "amount": 100
+}
+```
+
+`amount` is an integer in **minor units** (cents), never a decimal or float.
+It decodes into an `int64`, so `100.5` is rejected at decode rather than
+silently truncated. Unknown fields are rejected, so a misspelled field name
+fails loudly instead of being ignored.
+
+Validation, all producing `400`:
+
+| Field | Rule |
+|---|---|
+| `idempotencyKey` | required, non-empty, at most 255 characters |
+| `fromWalletId` | required, non-empty |
+| `toWalletId` | required, non-empty, different from `fromWalletId` |
+| `amount` | required, integer, greater than zero |
+
+### Response
+
+One body shape for every outcome, success or failure, so a client parses one
+thing:
+
+```json
+{
+  "id": "9f8c1a4e-0f1e-4c2b-9a77-6b2d1f0c5a31",
+  "idempotencyKey": "abc123",
+  "fromWalletId": "wallet_1",
+  "toWalletId": "wallet_2",
+  "amount": 100,
+  "state": "PROCESSED",
+  "failureReason": null,
+  "createdAt": "2026-09-12T10:23:03Z"
+}
+```
+
+`state` is the authoritative answer. A client never has to read the status code
+to learn what happened to its money — that matters because the status code is
+the part most likely to be mangled by a proxy.
+
+Errors that never produced a transfer return:
+
+```json
+{ "error": { "code": "WALLET_NOT_FOUND", "message": "wallet wallet_9 does not exist" } }
+```
+
+### Status codes
+
+| Code | When |
+|---|---|
+| `201 Created` | A new transfer was created and processed |
+| `200 OK` | Replay of a key whose transfer already processed — identical body |
+| `400 Bad Request` | Malformed JSON, unknown field, or failed validation |
+| `404 Not Found` | `fromWalletId` or `toWalletId` does not exist |
+| `409 Conflict` | Key already used with **different** parameters |
+| `422 Unprocessable Entity` | Insufficient funds — on the first call and on every replay |
+| `503 Service Unavailable` | Lock timeout; the request is safe to retry unchanged |
+| `500 Internal Server Error` | Anything unanticipated |
+
+Replays also carry `Idempotent-Replay: true`.
+
+The asymmetry is deliberate: a replayed success returns `200` rather than `201`
+because nothing was created on that call, while a replayed failure returns `422`
+both times because the failure *is* the answer and downgrading it to `200` would
+invite a client to treat a failed transfer as a successful one. The body is
+byte-identical across calls either way; only the status distinguishes "created
+now" from "already existed". The alternative — replaying the original status
+verbatim, so the caller cannot tell a replay from a first call — is defensible
+too, but makes `201 Created` a lie on a call that created nothing.
+
+## Idempotency
+
+`transfers.idempotency_key` carries a `UNIQUE` constraint. The key is claimed
+with a single statement:
+
+```sql
+INSERT INTO transfers (id, idempotency_key, request_hash, from_wallet_id,
+                       to_wallet_id, amount, state)
+VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id;
+```
+
+A returned row means this request owns the key. **No row means someone else owns
+it**, so the existing transfer is read and returned. The database arbitrates;
+there is no check-then-insert window for two requests to slip through.
+
+This is also why the claim is safe against a *concurrent* duplicate rather than
+merely a sequential one: when another transaction holds an uncommitted row with
+the same key, `ON CONFLICT DO NOTHING` blocks until that transaction commits or
+rolls back. On commit, the second request sees a settled transfer; on rollback,
+it claims the key itself. It can never observe `PENDING`.
+
+**`request_hash`** is `SHA-256` over the *parsed* fields, canonicalised as
+`fromWalletId \n toWalletId \n amount`, hex-encoded. Hashing parsed fields
+rather than the raw body means whitespace, key order, or an added unknown field
+cannot cause a false `409`. The idempotency key itself is excluded — it is the
+lookup key, not part of what is being fingerprinted. A replay whose hash differs
+from the stored one returns `409`: the alternative, returning a transfer the
+caller did not ask for, is worse than an error.
+
+**Namespace: global.** There is no authentication in scope, so a key is unique
+across the whole service. The consequence is real and worth stating: two
+independent callers who both choose `"abc123"` collide, and the second receives
+either the first's transfer or a `409`. In a multi-tenant deployment the
+constraint becomes `UNIQUE (client_id, idempotency_key)` and the key is scoped
+to the authenticated caller. That is a one-column change, deliberately deferred
+rather than half-built.
+
+**Transfer ids** are UUIDv4 generated in Go, not by the database. The id is then
+known before the statement runs, so it can be logged with the claim attempt
+regardless of outcome, and the service does not depend on the `pgcrypto`
+extension or a minimum PostgreSQL version for `gen_random_uuid()`. On a
+conflicting claim the generated id is simply discarded.
+
+## Transaction and concurrency
+
+One transaction covers the whole transfer. `READ COMMITTED`, PostgreSQL's
+default, is sufficient because correctness comes from row locks rather than from
+isolation: every balance read happens under `FOR UPDATE`, so there is no
+read-then-write window to protect. `SERIALIZABLE` would add serialization
+failures that must be retried in a loop, which is strictly more machinery for a
+guarantee the locks already provide.
+
+1. **Claim the idempotency key.** No row back → read the existing transfer and
+   return it, taking no wallet locks. Replays are cheap.
+2. **Lock both wallets**, as two separate statements issued in ascending wallet
+   id order:
+   ```sql
+   SELECT balance FROM wallets WHERE id = $1 FOR UPDATE;
+   ```
+   Separate statements rather than one `WHERE id IN (...) ORDER BY id`: a single
+   statement almost certainly locks in sorted order, but that depends on the
+   query plan, and it cannot report *which* wallet was missing. Two statements
+   make both properties obvious without an argument about planner behaviour.
+   Consistent ordering is what prevents two opposing transfers between the same
+   pair from deadlocking.
+3. **Check sufficiency.** Short → mark `FAILED` with a reason, **commit**, return
+   `422`.
+4. **Move the money**, relative rather than absolute:
+   ```sql
+   UPDATE wallets SET balance = balance - $1, updated_at = now() WHERE id = $2;
+   ```
+5. **Insert both ledger entries**, one `DEBIT` and one `CREDIT`.
+6. **Mark `PROCESSED`** with a guarded transition, and commit.
+
+Correctness comes from holding the row lock across the read and the write. The
+relative `UPDATE` is defensive style on top of that, not the thing that makes it
+safe — under `FOR UPDATE` an absolute write would be equally correct.
+
+**A failed transfer is committed, not rolled back.** This is the decision most
+worth defending. Rolling back would release the idempotency key, so a retry
+would re-attempt the debit and could succeed once the balance changed — the same
+key producing two different answers, which is precisely what idempotency is
+supposed to forbid. Committing the `FAILED` row means the key is permanently
+bound to that answer. A caller who tops the wallet up and genuinely wants to
+retry must use a **new** idempotency key; that is a correct requirement, not a
+limitation.
+
+`PENDING` therefore never escapes the transaction. It is not decorative: it is
+the state in which the key is claimed but the money has not moved, and it is the
+row that would survive if this ever became a two-phase or asynchronous transfer.
+Its guarded transition (`WHERE id = $1 AND state = 'PENDING'`) cannot fail today,
+and is kept as an assertion that the state machine is real.
+
+### Wallet existence
+
+The claim in step 1 carries foreign keys to `wallets`, so an unknown wallet
+raises `23503` and aborts the transaction. The handler maps that to `404`,
+reading `transfers_from_wallet_fk` or `transfers_to_wallet_fk` from the error to
+name the offending wallet — which is why those constraints are named explicitly
+in the migration rather than left to PostgreSQL's defaults.
+
+Because the transaction aborts, **the key is not claimed**. A later valid request
+reusing that key succeeds rather than returning `409`. That is correct: the first
+attempt created nothing, so there is no prior result to be idempotent about.
+Validation failures behave the same way — they are rejected before any database
+work.
+
+## Failure modes
+
+| Failure | Behaviour |
+|---|---|
+| Duplicate request, same parameters | Original transfer returned; no second transfer, no second ledger pair |
+| Duplicate request, different parameters | `409`; the stored transfer is untouched |
+| Response lost after commit | Retry replays the committed transfer — the reason the key is claimed in the same transaction that moves the money |
+| Process crashes mid-transfer | Transaction rolls back; key unclaimed; no partial ledger; safe to retry |
+| Insufficient funds | `FAILED` committed, `422`, no money moved, same answer on every replay |
+| Unknown wallet | `404`; nothing written |
+| Concurrent debits of one wallet | Serialised by `FOR UPDATE`; the second sees the first's balance |
+| Contention exceeds `lock_timeout` | `55P03` → `503`; safe to retry unchanged |
+| Overdraft attempted despite the check | `CHECK (balance >= 0)` aborts the transaction → `500`. Unreachable by design; the constraint exists so a logic bug corrupts nothing |
+| Balance overflows `BIGINT` | `22003` → `500`. Not defended against further; the bound is ~9.2×10¹⁸ minor units |
+
+A constraint violation aborts the whole transaction in PostgreSQL, which is why
+the sufficiency check under the lock is the real path and `CHECK (balance >= 0)`
+is only the backstop: the service cannot catch it and write `FAILED` in the same
+transaction without a savepoint.
+
+## Retry behaviour
+
+`503` and `500` are retryable with the **same** key — that is what the key is
+for. `400`, `404`, and `409` are terminal; retrying changes nothing. `422` is
+terminal for that key: the transfer failed and will keep reporting that it
+failed. Retrying the *intent* requires a new key.
+
+## Indexes
+
+`wallets` and `transfers` are reached by primary key, and `transfers` also by
+`idempotency_key`, which its `UNIQUE` constraint already indexes.
+`UNIQUE (transfer_id, type)` on `ledger_entries` doubles as the index for
+reading a transfer's entries. The single explicit secondary index is
+`(wallet_id, id)` on `ledger_entries`, for per-wallet reads and for the test
+asserting stored balance equals the sum of a wallet's entries.
+
+**No index exists for querying transfers by wallet**, because nothing queries
+them that way — transfer history is out of scope. Adding one now would be
+speculative. A transfer-history endpoint would want
+`(from_wallet_id, created_at DESC)`, and a symmetric index on `to_wallet_id`
+only if incoming history were exposed too; `to_wallet_id` is deliberately left
+unindexed until a reader exists.
+
+## Consistency expectations
+
+- The ledger always balances: every transfer has exactly one `DEBIT` and one
+  `CREDIT` of equal amount, enforced by `UNIQUE (transfer_id, type)` and by
+  writing both entries in the transfer's own transaction.
+- A wallet's stored balance always equals the sum of its ledger entries. Stored
+  balance is the operational value; the ledger is the audit record. A test
+  asserts they agree.
+- No ledger entry can exist without its transfer (foreign key), and no transfer
+  can reference a wallet that does not exist (foreign key).
+- A transfer is `FAILED` if and only if it carries a `failure_reason`.
+
+## Observability
+
+Structured logging via stdlib `log/slog`, one record per request carrying
+transfer id, idempotency key, both wallet ids, amount, outcome state, whether it
+was a replay, and duration. That is enough to answer "what happened to this
+transfer" and "is this caller retrying" from logs alone. Amounts are logged;
+wallet ids are opaque identifiers, not personal data.
+
+Metrics and tracing are out of scope. The counters worth adding first would be
+transfers by outcome, replay rate, and lock-timeout rate.
+
+## Testing
+
+Integration tests run against a **real PostgreSQL**. The database is never
+mocked: a mocked query passes happily while the SQL underneath it is wrong, and
+the SQL is where every guarantee in this document actually lives. Tests skip
+when `TEST_DATABASE_URL` is unset, so `go test ./...` works without a database;
+CI starts one and sets it.
+
+Wallets are seeded by a test helper inserting rows directly, since no endpoint
+creates them. Each test works on its own wallet ids so tests do not interfere.
+
+Behaviour covered:
+
+- happy path: balances move, exactly two ledger entries, transfer `PROCESSED`
+- duplicate key: original transfer returned, no second transfer, no second pair
+- duplicate key, different parameters: `409`, stored transfer untouched
+- insufficient funds: `FAILED` committed, no money moved, replay returns `422`
+- unknown wallet: `404`, nothing written, key left unclaimed
+- concurrent debits of one wallet: no double spend, no negative balance
+- invariant: every wallet's stored balance equals the sum of its ledger entries
+
+Assertions are behavioural — balances, entries, states, status codes — not
+assertions about which queries ran.
+
+### Schema verification
+
+The migration's constraints were verified against a live database rather than
+assumed: 16 assertions, each attempting a write the schema must reject and
+checking the SQLSTATE and constraint name produced. All 16 pass. The migration
+is idempotent across repeated runs, and `lock_timeout` was measured firing at
+3.02s under real row contention.
