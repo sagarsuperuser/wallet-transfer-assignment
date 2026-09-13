@@ -8,16 +8,41 @@ import (
 	"fmt"
 )
 
-// Validation errors. Each describes a request that is malformed on its face,
-// independent of any state in the database, so the handler maps all of them to
-// 400 without needing to know which one it received.
+// ErrValidation is the category every validation error reports itself as, so a
+// caller can map the whole class to 400 with one check. Matching the category
+// rather than listing each error means a rule added later cannot be forgotten
+// by the handler and silently become a 500.
+var ErrValidation = errors.New("invalid request")
+
+// ValidationError describes a request that is malformed on its face,
+// independent of any state in the database.
+type ValidationError struct {
+	// Field is the request field at fault, in the spelling the client sent.
+	Field   string
+	Message string
+}
+
+func (e *ValidationError) Error() string { return e.Message }
+
+// Is reports every ValidationError as ErrValidation.
+func (e *ValidationError) Is(target error) bool { return target == ErrValidation }
+
+// Validation errors. Each is a distinct value, so callers can still match one
+// exactly with errors.Is; each also matches ErrValidation.
 var (
-	ErrMissingIdempotencyKey = errors.New("idempotencyKey is required")
-	ErrIdempotencyKeyTooLong = fmt.Errorf("idempotencyKey must be at most %d characters", MaxIdempotencyKeyLength)
-	ErrMissingFromWallet     = errors.New("fromWalletId is required")
-	ErrMissingToWallet       = errors.New("toWalletId is required")
-	ErrSameWallet            = errors.New("fromWalletId and toWalletId must differ")
-	ErrNonPositiveAmount     = errors.New("amount must be greater than zero")
+	ErrMissingIdempotencyKey = &ValidationError{
+		Field: "idempotencyKey", Message: "idempotencyKey is required"}
+	ErrIdempotencyKeyTooLong = &ValidationError{
+		Field:   "idempotencyKey",
+		Message: fmt.Sprintf("idempotencyKey must be at most %d characters", MaxIdempotencyKeyLength)}
+	ErrMissingFromWallet = &ValidationError{
+		Field: "fromWalletId", Message: "fromWalletId is required"}
+	ErrMissingToWallet = &ValidationError{
+		Field: "toWalletId", Message: "toWalletId is required"}
+	ErrSameWallet = &ValidationError{
+		Field: "toWalletId", Message: "fromWalletId and toWalletId must differ"}
+	ErrNonPositiveAmount = &ValidationError{
+		Field: "amount", Message: "amount must be greater than zero"}
 )
 
 // Outcome errors. These depend on stored state, and each maps to its own status
