@@ -18,7 +18,18 @@ import (
 	"github.com/sagarsuperuser/wallet-transfer-assignment/migrations"
 )
 
-var migrateOnce sync.Once
+// The schema is applied once per test binary. migrateErr is package level, not
+// local to Pool, so every test reports the real migration failure rather than
+// only the one that happened to run first — the rest would otherwise see a nil
+// error and fail later on missing tables, which points at the wrong layer.
+// The schema is applied once per test binary. migrateErr is package level, not
+// local to Pool, so every test reports the real migration failure rather than
+// only the one that happened to run first — the rest would otherwise see a nil
+// error and fail later on missing tables, which points at the wrong layer.
+var (
+	migrateOnce sync.Once
+	migrateErr  error
+)
 
 // Pool connects to the database named by TEST_DATABASE_URL and ensures the
 // schema is applied.
@@ -49,7 +60,6 @@ func Pool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	var migrateErr error
 	migrateOnce.Do(func() {
 		migrateErr = db.Migrate(context.Background(), pool, migrations.FS)
 	})
