@@ -176,8 +176,28 @@ guarantee the locks already provide.
 2. **Lock both wallets**, as two separate statements issued in ascending wallet
    id order:
    ```sql
-   SELECT balance FROM wallets WHERE id = $1 FOR UPDATE;
+   SELECT balance FROM wallets WHERE id = $1 FOR NO KEY UPDATE;
    ```
+   `FOR NO KEY UPDATE`, not `FOR UPDATE`, and the difference is load-bearing.
+   Step 1 inserts a row with foreign keys to `wallets`, which takes a
+   `FOR KEY SHARE` lock on both wallet rows — that is how PostgreSQL stops a
+   referenced row disappearing under a foreign key. `FOR UPDATE` **conflicts**
+   with `FOR KEY SHARE`, so claiming the key and then reaching for `FOR UPDATE`
+   asks to upgrade a lock already shared with every other in-flight transfer
+   touching that wallet. Two transactions each waiting for the other to release
+   a shared lock deadlock, and lock ordering cannot prevent it because the cycle
+   is not about order.
+
+   `FOR NO KEY UPDATE` does not conflict with `FOR KEY SHARE`, and does conflict
+   with itself — exactly the mutual exclusion a debit needs. It is also the
+   honest strength: a transfer changes `balance` and `updated_at`, never the
+   wallet's key.
+
+   This was found by the concurrent-debit test, not by reasoning: ten concurrent
+   transfers against one wallet deadlocked with `40P01` on the first run. The
+   repository tests had not caught it because they lock wallets without first
+   claiming a transfer in the same transaction, which is what creates the
+   shared lock to upgrade from.
    Separate statements rather than one `WHERE id IN (...) ORDER BY id`: a single
    statement almost certainly locks in sorted order, but only because the plan
    happens to sort before locking, which is a property of the planner rather
@@ -295,6 +315,7 @@ wallet produces depends on whether the idempotency key was free.
 | Unknown wallet, key already held | `409` — the claim inserts no row, so the foreign key is never validated and the hash mismatch answers first |
 | Concurrent debits of one wallet | Serialised by `FOR UPDATE`; the second sees the first's balance |
 | Contention exceeds `lock_timeout` | `55P03` → `503`; safe to retry unchanged |
+| Lock upgrade from the foreign key's `FOR KEY SHARE` | Prevented by locking with `FOR NO KEY UPDATE`; `FOR UPDATE` deadlocks under concurrent transfers on one wallet |
 | Overdraft attempted despite the check | `CHECK (balance >= 0)` aborts the transaction → `500`. Unreachable by design; the constraint exists so a logic bug corrupts nothing |
 | Balance overflows `BIGINT` | `22003` → `500`. Not defended against further; the bound is ~9.2×10¹⁸ minor units |
 

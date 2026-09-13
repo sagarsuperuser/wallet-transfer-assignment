@@ -15,13 +15,27 @@ import (
 // and writing under the same lock is what closes the read-then-write window
 // that would otherwise let two concurrent debits both see enough money.
 //
+// FOR NO KEY UPDATE rather than FOR UPDATE, and the difference is not cosmetic.
+// Inserting a transfer takes a FOR KEY SHARE lock on both wallet rows, because
+// that is how PostgreSQL stops a referenced row being deleted underneath a
+// foreign key. FOR UPDATE conflicts with FOR KEY SHARE, so a transaction that
+// claims the idempotency key and then reaches for FOR UPDATE is asking to
+// upgrade a lock it already shares with every other in-flight transfer touching
+// that wallet — and two transactions each waiting for the other to release a
+// shared lock is a deadlock that no amount of lock ordering can prevent.
+//
+// FOR NO KEY UPDATE does not conflict with FOR KEY SHARE, but does conflict
+// with itself, which is exactly the mutual exclusion a debit needs. It is also
+// the honest lock strength: a transfer changes balance and updated_at, never
+// the wallet's key.
+//
 // Callers must lock wallets in a consistent order — see LockWalletsInOrder.
 func (t *Tx) LockWallet(ctx context.Context, walletID string) (domain.Wallet, error) {
 	const query = `
 		SELECT id, balance, created_at, updated_at
 		FROM wallets
 		WHERE id = $1
-		FOR UPDATE`
+		FOR NO KEY UPDATE`
 
 	var wallet domain.Wallet
 	err := t.tx.QueryRow(ctx, query, walletID).Scan(

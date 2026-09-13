@@ -89,3 +89,50 @@ func Balance(t *testing.T, pool *pgxpool.Pool, walletID string) int64 {
 
 	return balance
 }
+
+// LedgerNet returns a wallet's credits minus its debits, read with a plain
+// query. A wallet's stored balance must always equal the balance it was seeded
+// with plus this number.
+func LedgerNet(t *testing.T, pool *pgxpool.Pool, walletID string) int64 {
+	t.Helper()
+
+	var net int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT COALESCE(SUM(CASE WHEN type = 'CREDIT' THEN amount ELSE -amount END), 0)
+		FROM ledger_entries
+		WHERE wallet_id = $1`, walletID).Scan(&net); err != nil {
+		t.Fatalf("sum ledger entries for %s: %v", walletID, err)
+	}
+
+	return net
+}
+
+// CountTransfers returns how many transfers exist for an idempotency key. It
+// should never exceed one; the unique constraint makes more impossible, and
+// asserting it proves the constraint is doing the work.
+func CountTransfers(t *testing.T, pool *pgxpool.Pool, idempotencyKey string) int {
+	t.Helper()
+
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM transfers WHERE idempotency_key = $1`,
+		idempotencyKey).Scan(&count); err != nil {
+		t.Fatalf("count transfers for key %s: %v", idempotencyKey, err)
+	}
+
+	return count
+}
+
+// CountLedgerEntries returns how many ledger entries a transfer produced.
+func CountLedgerEntries(t *testing.T, pool *pgxpool.Pool, transferID string) int {
+	t.Helper()
+
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM ledger_entries WHERE transfer_id = $1`,
+		transferID).Scan(&count); err != nil {
+		t.Fatalf("count ledger entries for transfer %s: %v", transferID, err)
+	}
+
+	return count
+}

@@ -11,6 +11,11 @@ import (
 // MaxIdempotencyKeyLength bounds a key so a caller cannot store unbounded text.
 const MaxIdempotencyKeyLength = 255
 
+// FailureReasonInsufficientFunds is recorded on a transfer whose source wallet
+// could not cover the amount. It is stored data rather than a log message: a
+// replay of the same idempotency key reports it back verbatim.
+const FailureReasonInsufficientFunds = "insufficient funds"
+
 // State is the lifecycle of a transfer. A transfer is created PENDING and moves
 // exactly once, to PROCESSED or FAILED, within a single database transaction.
 type State string
