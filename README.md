@@ -112,16 +112,10 @@ its rejected alternative, in [`docs/design.md`](docs/design.md).
 4. **A failed transfer is committed, not rolled back.** Rolling back would
    release the idempotency key, so a retry could re-attempt the debit and
    succeed once the balance changed — one key producing two different answers.
-5. **`FOR NO KEY UPDATE`, not `FOR UPDATE`.** Claiming the key takes a
-   `FOR KEY SHARE` lock on both wallet rows, because that is how PostgreSQL
-   stops a referenced row disappearing under a foreign key. `FOR UPDATE`
-   conflicts with `FOR KEY SHARE`, so two concurrent transfers on one wallet
-   would each hold a shared lock and wait for the other to release it — a
-   deadlock that lock ordering cannot prevent, because the cycle is an upgrade
-   rather than an ordering. `FOR NO KEY UPDATE` does not conflict with
-   `FOR KEY SHARE` but does conflict with itself, which is exactly the mutual
-   exclusion a debit needs, and is the honest strength for a statement that
-   never changes the wallet's key.
+5. **`FOR NO KEY UPDATE`, not `FOR UPDATE`.** The claim's foreign keys take a
+   `FOR KEY SHARE` lock on both wallets, which `FOR UPDATE` conflicts with — so
+   concurrent transfers on one wallet would deadlock trying to upgrade a lock
+   they already share. Lock ordering cannot prevent that.
 
 ## Layout
 
