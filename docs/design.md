@@ -333,37 +333,19 @@ the sufficiency check under the lock is the real path and `CHECK (balance >= 0)`
 is only the backstop: the service cannot catch it and write `FAILED` in the same
 transaction without a savepoint.
 
-**There is no per-request deadline**, and it is worth being precise about what
-that does and does not leave exposed. `ReadTimeout`, `WriteTimeout` and
-`IdleTimeout` bound the *socket*, not the handler.
+**There is no per-request deadline.** `ReadTimeout`, `WriteTimeout` and
+`IdleTimeout` bound the socket, not the handler: `WriteTimeout` arms a deadline
+on the connection and bites only when the handler finally writes, so a two-second
+`WriteTimeout` lets a six-second handler run all six with its context never
+cancelled. It never bounds how long a transfer holds its wallet locks.
 
-`WriteTimeout` in particular bounds nothing about execution: it arms a deadline
-on the connection, and when that deadline passes nothing happens, because
-nothing is being written. It bites only when the handler finally attempts its
-write, which fails, closing the connection. Measured with a two-second
-`WriteTimeout` and a handler that wanted six: the handler ran all six, its
-request context was never cancelled, and the client waited the full six seconds
-before seeing an `EOF`. Since a transfer runs entirely inside one transaction,
-that means `WriteTimeout` never bounds how long the wallet rows stay locked — it
-only decides whether the response is still deliverable afterwards.
-
-What bounds a request today is narrower but covers the cases this design
-actually produces:
-
-- A lock wait is bounded at 3s by `lock_timeout`, which is the failure mode
-  pessimistic locking introduces.
-- Every query is a single-row lookup by primary key or by `idempotency_key`.
-  There are no scans, joins or aggregates to run long.
-- Pool exhaustion is self-limiting, because every connection holder is itself
-  bounded by a lock timeout plus a primary-key lookup.
-- A client that gives up cancels the request context, and pgx aborts the
-  transaction.
-
-That leaves one genuinely unbounded case: a PostgreSQL connection that hangs
-mid-query. A middleware setting a deadline on the request context — mapped to
-`503`, the same answer contention already gives, so the status contract does not
-change — is the first thing to add, and is left out here because the exposure it
-closes is narrow and the cases above cover the rest.
+What does bound a request covers the cases this design produces: `lock_timeout`
+for lock waits, primary-key lookups everywhere so no query runs long, a pool that
+drains because every holder is itself bounded, and context cancellation when a
+client disconnects. That leaves a PostgreSQL connection hanging mid-query as the
+one unbounded case. A middleware setting a deadline on the request context —
+mapped to `503`, so the status contract does not change — is the first thing to
+add, and is left out because that exposure is narrow.
 
 ## Retry behaviour
 
