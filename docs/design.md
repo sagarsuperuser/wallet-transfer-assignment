@@ -182,41 +182,11 @@ guarantee the locks already provide.
 1. **Claim the idempotency key.** No row back → read the existing transfer and
    return it, taking no wallet locks. Replays are cheap.
 2. **Lock both wallets**, as two separate statements issued in ascending wallet
-   id order:
+   id order. Both are guaranteed to exist by now: step 1's foreign keys have
+   already aborted the transaction if either does not.
    ```sql
    SELECT balance FROM wallets WHERE id = $1 FOR NO KEY UPDATE;
    ```
-   `FOR NO KEY UPDATE`, not `FOR UPDATE`, and the difference is load-bearing.
-   Step 1 inserts a row with foreign keys to `wallets`, which takes a
-   `FOR KEY SHARE` lock on both wallet rows — that is how PostgreSQL stops a
-   referenced row disappearing under a foreign key. `FOR UPDATE` **conflicts**
-   with `FOR KEY SHARE`, so claiming the key and then reaching for `FOR UPDATE`
-   asks to upgrade a lock already shared with every other in-flight transfer
-   touching that wallet. Two transactions each waiting for the other to release
-   a shared lock deadlock, and lock ordering cannot prevent it because the cycle
-   is not about order.
-
-   `FOR NO KEY UPDATE` does not conflict with `FOR KEY SHARE`, and does conflict
-   with itself — exactly the mutual exclusion a debit needs. It is also the
-   honest strength: a transfer changes `balance` and `updated_at`, never the
-   wallet's key.
-
-   This was found by the concurrent-debit test, not by reasoning: ten concurrent
-   transfers against one wallet deadlocked with `40P01` on the first run. The
-   repository tests had not caught it because they lock wallets without first
-   claiming a transfer in the same transaction, which is what creates the
-   shared lock to upgrade from.
-   Separate statements rather than one `WHERE id IN (...) ORDER BY id`: a single
-   statement almost certainly locks in sorted order, but only because the plan
-   happens to sort before locking, which is a property of the planner rather
-   than of the query. Two statements make the ordering a property of the code,
-   and consistent ordering is what stops two opposing transfers between the same
-   pair from deadlocking.
-
-   Both wallets are guaranteed to exist by this point — the claim in step 1
-   carries foreign keys, so an unknown wallet has already aborted the
-   transaction, and neither row can vanish underneath us while the transfer
-   references it. A missing row here would be a bug, not a 404.
 3. **Check sufficiency.** Short → mark `FAILED` with a reason, **commit**, return
    `422`.
 4. **Move the money**, relative rather than absolute:
@@ -230,46 +200,55 @@ Correctness comes from holding the row lock across the read and the write. The
 relative `UPDATE` is defensive style on top of that, not the thing that makes it
 safe — under `FOR UPDATE` an absolute write would be equally correct.
 
-**A failed transfer is committed, not rolled back.** This is the decision most
-worth defending. Rolling back would release the idempotency key, so a retry
-would re-attempt the debit and could succeed once the balance changed — the same
-key producing two different answers, which is precisely what idempotency is
-supposed to forbid. Committing the `FAILED` row means the key is permanently
-bound to that answer. A caller who tops the wallet up and genuinely wants to
-retry must use a **new** idempotency key; that is a correct requirement, not a
+### Lock mode and ordering
+
+`FOR NO KEY UPDATE`, not `FOR UPDATE`. Step 1's foreign keys take a
+`FOR KEY SHARE` lock on both wallet rows, which is how PostgreSQL stops a
+referenced row disappearing. `FOR UPDATE` **conflicts** with `FOR KEY SHARE`, so
+claiming the key and then reaching for `FOR UPDATE` asks to upgrade a lock every
+other in-flight transfer on that wallet already shares — and two transactions
+each waiting for the other to release a shared lock deadlock. Lock ordering
+cannot prevent that, because the cycle is an upgrade rather than an ordering.
+
+`FOR NO KEY UPDATE` does not conflict with `FOR KEY SHARE` but does conflict with
+itself, which is the mutual exclusion a debit needs. It is also the honest
+strength: a transfer changes `balance` and `updated_at`, never the wallet's key.
+This was found by the concurrent-debit test, which deadlocked with `40P01` on its
+first run; the repository tests had missed it because they lock wallets without
+first claiming a transfer, so there was no shared lock to upgrade from.
+
+Two statements rather than one `WHERE id IN (...) ORDER BY id`, because a single
+statement locks in sorted order only as a consequence of the plan sorting before
+locking — a property of the planner rather than of the query. Two statements make
+the ordering a property of the code, and consistent ordering is what stops two
+opposing transfers between the same pair from deadlocking.
+
+### Why a failed transfer is committed
+
+Rolling back would release the idempotency key, so a retry could re-attempt the
+debit and succeed once the balance changed — the same key producing two different
+answers, which is what idempotency exists to forbid. Committing the `FAILED` row
+binds the key permanently to that answer. A caller who tops the wallet up and
+wants to retry must use a **new** key; that is a correct requirement, not a
 limitation.
 
-`PENDING` therefore never escapes the transaction. It is not decorative: it is
-the state in which the key is claimed but the money has not moved, and it is the
-row that would survive if this ever became a two-phase or asynchronous transfer.
+### The PENDING guard
+
+`PENDING` never escapes the transaction, so the transfer is only ever observed
+settled. It is not decorative: it names the state where the key is claimed but
+the money has not moved, and it is the row that would survive if this became an
+asynchronous or two-phase flow.
 
 The transition out of it is guarded in SQL as well as in the domain —
-`WHERE id = $1 AND state = 'PENDING'`, with a zero row count treated as an
-error. **In the flow above that guard never fires.** The service settles each
-transfer exactly once, inside the transaction that created the row, and no other
-transaction can see that row before it commits, let alone change its state. So
-the guard is defence in depth rather than a live check.
+`WHERE id = $1 AND state = 'PENDING'`, with a zero row count treated as an error
+— and **in the flow above that guard never fires**, because each transfer is
+settled once inside the transaction that created it. It is defence in depth for
+the day a `PENDING` row is committed and left for something else to finish, when
+two actors could otherwise settle the same transfer. Retrying a whole request is
+not that case: the claim conflicts on the key and never reaches the guard.
 
-It is kept because it costs one clause and the condition that makes it necessary
-is one design change away. Today `PENDING` exists only inside the transaction
-that creates it, so nothing else can reach the row. The moment a `PENDING` row is
-committed and left for something else to finish — an asynchronous transfer, a
-two-phase flow, a reconciler sweeping `WHERE state = 'PENDING'` — two actors can
-select the same transfer, and the guard is what lets only one of them settle it.
-
-Retrying the whole request is **not** that case, and it is worth being clear
-about why: a retry re-runs the claim, which conflicts on the idempotency key and
-returns the stored transfer, so the unique constraint answers first and the guard
-is never reached. The guard covers the narrower case of two settlements of a
-transfer that is already claimed.
-
-The repository test settles a transfer twice on purpose to confirm the second
-attempt is refused.
-
-One imprecision to be aware of: a zero row count is reported as an invalid state
-transition, which also covers a transfer id that does not exist at all. Both are
-programming errors rather than runtime conditions, so they are not told apart —
-distinguishing them would cost an extra query for a case that cannot occur.
+A zero row count also covers a transfer id that does not exist. Both are
+programming errors, so they are not told apart.
 
 ### Wallet existence
 
@@ -286,16 +265,14 @@ Validation failures behave the same way — they are rejected before any databas
 work.
 
 **Only one wallet is named when both are missing.** PostgreSQL validates the two
-foreign keys in declaration order and stops at the first violation, so a request
-naming two unknown wallets is blamed on `fromWalletId` alone — verified against a
-live database, which reports `transfers_from_wallet_fk`. The caller fixes that
-one, retries, and only then learns the destination is also unknown. Reporting
-both at once would need a pre-flight
-`SELECT id FROM wallets WHERE id = ANY($1)` before the claim: one extra
-non-locking read, with the foreign key still behind it as the backstop. Not done
-here, because a request naming two unknown wallets is a caller bug, and two round
-trips to discover it is a fair price for keeping the existence check in exactly
-one place.
+foreign keys in declaration order and stops at the first violation, so such a
+request is blamed on `fromWalletId` alone — verified by swapping the declaration
+order, which swapped the blame. The caller fixes that one, retries, and only then
+learns the destination is also unknown.
+
+Reporting both would need a pre-flight existence query before the claim. Not done
+here: naming two unknown wallets is a caller bug, and a second round trip is a
+fair price for keeping the existence check in one place.
 
 **A replay never reaches the foreign key.** `ON CONFLICT DO NOTHING` inserts no
 row when the key is already held, and foreign keys are validated only on an
@@ -357,19 +334,24 @@ failed. Retrying the *intent* requires a new key.
 
 ## Indexes
 
-`wallets` and `transfers` are reached by primary key, and `transfers` also by
-`idempotency_key`, which its `UNIQUE` constraint already indexes.
-`UNIQUE (transfer_id, type)` on `ledger_entries` doubles as the index for
-reading a transfer's entries: PostgreSQL implements a unique constraint as a
-B-tree index, and a B-tree on `(transfer_id, type)` serves a lookup on
-`transfer_id` alone, so no separate index is needed. Verified with `EXPLAIN` over
-10,000 entries — a single transfer's pair is found by index scan, not by
-scanning the table. This is a property of any unique constraint leading with
-`transfer_id`, not a benefit of choosing `(transfer_id, type)` over a wider key;
-that choice is justified by correctness alone, since a key including
-`wallet_id` would permit two `DEBIT` rows on one transfer. The single explicit secondary index is
-`(wallet_id, id)` on `ledger_entries`, for per-wallet reads and for the test
-asserting stored balance equals the sum of a wallet's entries.
+Everything is reached by an index that already exists for another reason:
+
+- `wallets` and `transfers`, by primary key.
+- `transfers`, also by `idempotency_key` — its `UNIQUE` constraint is a B-tree
+  index.
+- `ledger_entries`, by `transfer_id` — `UNIQUE (transfer_id, type)` is likewise a
+  B-tree, and a B-tree on two columns serves a lookup on the first alone.
+  Confirmed with `EXPLAIN` over 10,000 entries: one transfer's pair is found by
+  index scan, not by scanning the table.
+
+That last point is a property of any unique constraint leading with
+`transfer_id`, not a benefit of the narrower key. The narrowing is justified by
+correctness alone: including `wallet_id` would permit two `DEBIT` rows on one
+transfer.
+
+The single explicit secondary index is `(wallet_id, id)` on `ledger_entries`, for
+per-wallet reads and for the test asserting stored balance equals the sum of a
+wallet's entries.
 
 **No index exists for querying transfers by wallet**, because nothing queries
 them that way — transfer history is out of scope. Adding one now would be
