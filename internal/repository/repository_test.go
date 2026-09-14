@@ -60,9 +60,15 @@ func TestClaimTakesAFreeIdempotencyKey(t *testing.T) {
 	}
 }
 
-// The heart of idempotency: the second claim of a key must come back empty so
-// the caller returns the original transfer instead of moving money again.
-func TestClaimRefusesAHeldIdempotencyKey(t *testing.T) {
+// The first of a pair. This covers a duplicate arriving after the original has
+// committed — the ordinary case, where the row is visible. Its sibling,
+// TestConcurrentClaimsOfOneKeyBlockRatherThanRace, covers the duplicate that
+// arrives while the first claim is still in flight, which is the case only
+// ON CONFLICT DO NOTHING handles correctly. This one is kept alongside it
+// because it is instant and has no timing window: if the concurrent test ever
+// goes flaky, the basic guarantee still has a guard, and when both fail this one
+// says immediately that the fault is not concurrency.
+func TestClaimRefusesACommittedIdempotencyKey(t *testing.T) {
 	store, pool := newStore(t)
 	from := dbtest.Wallet(t, pool, 1000)
 	to := dbtest.Wallet(t, pool, 0)
