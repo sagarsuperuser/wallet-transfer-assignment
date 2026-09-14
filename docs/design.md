@@ -140,11 +140,19 @@ the same key, `ON CONFLICT DO NOTHING` blocks until that transaction commits or
 rolls back. On commit, the second request sees a settled transfer; on rollback,
 it claims the key itself. It can never observe `PENDING`.
 
-**`request_hash`** is `SHA-256` over the *parsed* fields, canonicalised as
-`fromWalletId \n toWalletId \n amount`, hex-encoded. Hashing parsed fields
-rather than the raw body means whitespace, key order, or an added unknown field
-cannot cause a false `409`. The idempotency key itself is excluded — it is the
-lookup key, not part of what is being fingerprinted. A replay whose hash differs
+**`request_hash`** is `SHA-256` over the *parsed* fields, hex-encoded. Hashing
+parsed fields rather than the raw body means whitespace, key order, or an added
+unknown field cannot cause a false `409`.
+
+Each field is length-prefixed as well as newline-separated — `wallet_1` becomes
+`8:wallet_1\n` — so the encoding does not depend on which characters a wallet id
+may contain. Separation alone would be ambiguous: wallet ids are opaque `TEXT`
+and may contain newlines, and `"a\nbc" → "x"` and `"a" → "bc\nx"` would then
+encode to the same bytes and fingerprint identically, so the second caller would
+receive the first caller's transfer instead of a `409`.
+
+The idempotency key itself is excluded from the hash — it is the lookup key, not
+part of what is being fingerprinted. A replay whose hash differs
 from the stored one returns `409`: the alternative, returning a transfer the
 caller did not ask for, is worse than an error.
 
