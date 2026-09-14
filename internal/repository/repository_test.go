@@ -426,6 +426,7 @@ func TestLockWalletsInOrderTakesTheLowestIdFirst(t *testing.T) {
 		`SELECT 1 FROM wallets WHERE id = $1 FOR UPDATE`, lower); err != nil {
 		t.Fatalf("hold the lower wallet: %v", err)
 	}
+	holderPID := backendPID(t, holder)
 
 	// Deliberately names the higher wallet first.
 	blocked := make(chan error, 1)
@@ -436,7 +437,7 @@ func TestLockWalletsInOrderTakesTheLowestIdFirst(t *testing.T) {
 		})
 	}()
 
-	waitForBlockedSession(t, pool)
+	waitForBlockerToBlockSomeone(t, pool, holderPID)
 
 	// The higher wallet must still be free.
 	probe, err := pool.Begin(ctx)
@@ -468,10 +469,17 @@ func orderedWallets(t *testing.T, pool *pgxpool.Pool) (lower, higher string) {
 	return first, second
 }
 
-// waitForBlockedSession waits until some session is waiting on a lock, so the
-// assertion that follows runs at a known point rather than after a guessed
-// sleep.
-func waitForBlockedSession(t *testing.T, pool *pgxpool.Pool) {
+// waitForBlockerToBlockSomeone waits until some session is blocked by the
+// session holding blockerPID, so the assertion that follows runs at a known
+// point rather than after a guessed sleep.
+//
+// It asks whether anyone is blocked *by our holder* rather than whether anyone
+// in the database is blocked at all. The database is shared: `go test ./...`
+// runs one process per package concurrently, and several tests manufacture lock
+// waits of their own, so a broad question would be answered by unrelated
+// contention and let this test probe before its own goroutine had blocked —
+// passing for the wrong reason.
+func waitForBlockerToBlockSomeone(t *testing.T, pool *pgxpool.Pool, blockerPID int) {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -480,9 +488,8 @@ func waitForBlockedSession(t *testing.T, pool *pgxpool.Pool) {
 		if err := pool.QueryRow(context.Background(), `
 			SELECT count(*) FROM pg_stat_activity
 			WHERE datname = current_database()
-			  AND wait_event_type = 'Lock'
-			  AND state = 'active'`).Scan(&waiting); err != nil {
-			t.Fatalf("check for blocked sessions: %v", err)
+			  AND $1 = ANY(pg_blocking_pids(pid))`, blockerPID).Scan(&waiting); err != nil {
+			t.Fatalf("check for sessions blocked by %d: %v", blockerPID, err)
 		}
 		if waiting > 0 {
 			return
@@ -490,7 +497,20 @@ func waitForBlockedSession(t *testing.T, pool *pgxpool.Pool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	t.Fatal("no session ever blocked on a lock")
+	t.Fatalf("no session ever blocked on the lock held by backend %d", blockerPID)
+}
+
+// backendPID reports the PostgreSQL backend serving this transaction, so other
+// sessions' waits can be attributed to it.
+func backendPID(t *testing.T, tx pgx.Tx) int {
+	t.Helper()
+
+	var pid int
+	if err := tx.QueryRow(context.Background(), `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatalf("read backend pid: %v", err)
+	}
+
+	return pid
 }
 
 // Pessimistic locking's failure mode: a transfer held up by another
