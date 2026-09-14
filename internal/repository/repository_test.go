@@ -519,3 +519,103 @@ func TestLockContentionSurfacesAsWalletBusy(t *testing.T) {
 		t.Errorf("waited %v before giving up, want roughly the 3s lock timeout", waited)
 	}
 }
+
+// TestConcurrentClaimsOfOneKeyBlockRatherThanRace covers the case the sequential
+// duplicate test cannot reach: two requests carrying the same idempotency key
+// where the second arrives while the first is still uncommitted.
+//
+// The distinction matters because the two cases succeed for different reasons. A
+// duplicate arriving after the first commits finds a visible row, which any
+// implementation would notice — including a check-then-insert, which is the
+// design this one was chosen over. A duplicate arriving mid-flight finds nothing
+// visible, and only ON CONFLICT DO NOTHING handles it, by waiting on the first
+// transaction's outcome. Without this test a regression to check-then-insert
+// would keep the suite green while letting two concurrent requests both insert.
+func TestConcurrentClaimsOfOneKeyBlockRatherThanRace(t *testing.T) {
+	store, pool := newStore(t)
+	from := dbtest.Wallet(t, pool, 1000)
+	to := dbtest.Wallet(t, pool, 0)
+	ctx := context.Background()
+
+	first := pendingTransfer(from, to, 100)
+	second := pendingTransfer(from, to, 100)
+	second.IdempotencyKey = first.IdempotencyKey
+
+	claimHeld := make(chan struct{})    // first has claimed but not committed
+	releaseFirst := make(chan struct{}) // tells the first to commit
+	firstDone := make(chan error, 1)
+
+	go func() {
+		firstDone <- store.WithTx(ctx, func(ctx context.Context, tx *repository.Tx) error {
+			_, won, err := tx.ClaimTransfer(ctx, first)
+			if err != nil {
+				return err
+			}
+			if !won {
+				return errors.New("the first request failed to claim a free key")
+			}
+			close(claimHeld)
+			<-releaseFirst
+			return nil // committing
+		})
+	}()
+	<-claimHeld
+
+	type outcome struct {
+		won      bool
+		existing domain.Transfer
+		at       time.Time
+		err      error
+	}
+	secondDone := make(chan outcome, 1)
+
+	go func() {
+		var result outcome
+		result.err = store.WithTx(ctx, func(ctx context.Context, tx *repository.Tx) error {
+			_, won, err := tx.ClaimTransfer(ctx, second)
+			if err != nil {
+				return err
+			}
+			result.won = won
+			if !won {
+				result.existing, err = tx.TransferByIdempotencyKey(ctx, second.IdempotencyKey)
+			}
+			return err
+		})
+		result.at = time.Now()
+		secondDone <- result
+	}()
+
+	// While the first holds the key uncommitted, the second must wait. Anything
+	// that returns here has decided without knowing the first's outcome.
+	select {
+	case result := <-secondDone:
+		t.Fatalf("the second claim finished while the first was still open: won=%v err=%v",
+			result.won, result.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	released := time.Now()
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+
+	result := <-secondDone
+	if result.err != nil {
+		t.Fatalf("second request: %v", result.err)
+	}
+	if !result.at.After(released) {
+		t.Error("the second claim returned before the first committed")
+	}
+	if result.won {
+		t.Fatal("both requests claimed the same idempotency key")
+	}
+	if result.existing.ID != first.ID {
+		t.Errorf("the second request read transfer %s, want the first's %s",
+			result.existing.ID, first.ID)
+	}
+	if got := dbtest.CountTransfers(t, pool, first.IdempotencyKey); got != 1 {
+		t.Errorf("%d transfers exist for one key, want 1", got)
+	}
+}
