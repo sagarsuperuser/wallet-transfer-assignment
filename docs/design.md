@@ -339,13 +339,14 @@ on the connection and bites only when the handler finally writes, so a two-secon
 `WriteTimeout` lets a six-second handler run all six with its context never
 cancelled. It never bounds how long a transfer holds its wallet locks.
 
-What does bound a request covers the cases this design produces: `lock_timeout`
-for lock waits, primary-key lookups everywhere so no query runs long, a pool that
-drains because every holder is itself bounded, and context cancellation when a
-client disconnects. That leaves a PostgreSQL connection hanging mid-query as the
-one unbounded case. A middleware setting a deadline on the request context —
-mapped to `503`, so the status contract does not change — is the first thing to
-add, and is left out because that exposure is narrow.
+Four things do bound a request, between them covering the cases this design
+produces: `lock_timeout` for lock waits, primary-key lookups everywhere so no
+query runs long, a pool that drains because every holder is itself bounded, and
+context cancellation when a client disconnects. That leaves a PostgreSQL
+connection hanging mid-query as the one unbounded case. A middleware setting a
+deadline on the request context — mapped to `503`, so the status contract does
+not change — is the first thing to add, and is left out because that exposure is
+narrow.
 
 ## Retry behaviour
 
