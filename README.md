@@ -6,14 +6,16 @@ a `UNIQUE` constraint, not a check-then-insert. An overdraft is a `CHECK`, not a
 `if`. A second debit on one transfer is `UNIQUE (transfer_id, type)`, not a
 convention.
 
-The one invariant that needs more than a constraint — that a transfer's two
-ledger entries are both present and balanced — is held by construction in the
-domain instead, and [`docs/design.md`](docs/design.md) says exactly where the
+One invariant needs more than a constraint: that a transfer's two ledger entries
+are both present and balanced. That one is held by construction in the domain,
+and [`docs/design.md`](docs/design.md) says exactly where the
 schema stops.
 
-The full design — API contract, transaction shape, failure modes, and for each
-decision the alternative that was rejected — is in
-**[`docs/design.md`](docs/design.md)**.
+The full design is in **[`docs/design.md`](docs/design.md)**: the API contract,
+the transaction shape, the failure modes, and for each decision the alternative
+that was rejected.
+
+---
 
 ## Quick start
 
@@ -27,7 +29,7 @@ export DATABASE_URL='postgres://wallet:wallet@localhost:5432/wallet?sslmode=disa
 go run ./cmd/migrate
 ```
 
-Wallets are assumed to exist — nothing in scope creates one — so seed a couple
+Wallets are assumed to exist. Nothing in scope creates one, so seed a couple
 before starting the service, while you still have a prompt:
 
 ```bash
@@ -51,6 +53,8 @@ curl -i -X POST localhost:8080/transfers \
 Send it **twice**. The second call returns `200` with `Idempotent-Replay: true`
 and a byte-identical body, and the money moves only once.
 
+---
+
 ## API
 
 ### `POST /transfers`
@@ -64,10 +68,12 @@ and a byte-identical body, and the money moves only once.
 }
 ```
 
-`amount` is an integer in **minor units** (cents) — never a float. `100.5` is
-rejected at decode rather than truncated, and an unknown field is rejected
-rather than ignored, so a misspelled `"ammount"` fails loudly instead of sending
-a transfer of zero.
+Decoding is strict:
+
+- `amount` is an integer in **minor units** (cents), never a float. `100.5` is
+  rejected at decode rather than truncated.
+- An unknown field is rejected rather than ignored, so a misspelled `"ammount"`
+  fails loudly instead of sending a transfer of zero.
 
 Every outcome that produced a transfer returns the same body:
 
@@ -85,17 +91,17 @@ Every outcome that produced a transfer returns the same body:
 ```
 
 `state` is the authoritative answer. A client never has to read the status code
-to learn what happened to its money — which matters, because the status code is
-the part most likely to be rewritten by a proxy.
+to learn what happened to its money. That matters, because the status code is the
+part most likely to be rewritten by a proxy.
 
 | Status | When |
 |---|---|
 | `201 Created` | A new transfer was created and processed |
-| `200 OK` | Replay of a processed key — identical body, `Idempotent-Replay: true` |
+| `200 OK` | Replay of a processed key. Identical body, `Idempotent-Replay: true` |
 | `400 Bad Request` | Malformed JSON, unknown field, or failed validation |
 | `404 Not Found` | A wallet does not exist |
 | `409 Conflict` | Key already used with **different** parameters |
-| `422 Unprocessable Entity` | Insufficient funds — first call and every replay |
+| `422 Unprocessable Entity` | Insufficient funds, on the first call and every replay |
 | `503 Service Unavailable` | Lock timeout; safe to retry unchanged |
 
 Conditions that produced no transfer return an error object instead:
@@ -103,6 +109,8 @@ Conditions that produced no transfer return an error object instead:
 ```json
 { "error": { "code": "WALLET_NOT_FOUND", "message": "wallet wallet_9 does not exist" } }
 ```
+
+---
 
 ## Design decisions
 
@@ -123,11 +131,13 @@ its rejected alternative, in [`docs/design.md`](docs/design.md).
    parameters and answers `409`.
 4. **A failed transfer is committed, not rolled back.** Rolling back would
    release the idempotency key, so a retry could re-attempt the debit and
-   succeed once the balance changed — one key producing two different answers.
+   succeed once the balance changed, so one key would produce two different answers.
 5. **`FOR NO KEY UPDATE`, not `FOR UPDATE`.** The claim's foreign keys take a
-   `FOR KEY SHARE` lock on both wallets, which `FOR UPDATE` conflicts with — so
-   concurrent transfers on one wallet would deadlock trying to upgrade a lock
-   they already share. Lock ordering cannot prevent that.
+   `FOR KEY SHARE` lock on both wallets, which `FOR UPDATE` conflicts with. Two
+   concurrent transfers on one wallet would deadlock trying to upgrade a lock they
+   already share, and lock ordering cannot prevent that.
+
+---
 
 ## Layout
 
@@ -143,8 +153,13 @@ internal/dbtest    fixtures shared by the integration tests
 docs/design.md     the design note
 ```
 
-Dependencies are one-directional: `domain` imports nothing, and nothing above
-`repository` imports pgx.
+Dependencies are one-directional:
+
+- `domain` imports nothing.
+- Nothing above `repository` imports pgx.
+- All SQL lives in `repository`.
+
+---
 
 ## Testing
 
@@ -155,18 +170,23 @@ go test -race ./...
 ```
 
 Integration tests run against **real PostgreSQL**. The database is never mocked:
-a mocked query passes happily while the SQL underneath it is wrong, and the SQL
-is where the locking, the constraints and the idempotency claim actually live.
-Every bug found during this build was an interaction between layers, which no
-mock would have reproduced.
 
-With `TEST_DATABASE_URL` unset the integration tests skip and the suite passes,
-so a fresh clone gives a clear message rather than a dozen connection errors.
-With `CI` set they **fail** instead — a skipped test and a passing test are both
-green, and a pipeline that quietly stopped exercising the SQL would report
-success while testing nothing.
+- A mocked query passes happily while the SQL underneath it is wrong, and the SQL
+  is where the locking, the constraints and the idempotency claim actually live.
+- Every bug found during this build was an interaction between layers, which no
+  mock would have reproduced.
+
+Whether they run depends on the environment:
+
+- `TEST_DATABASE_URL` unset: the integration tests skip and the suite passes, so
+  a fresh clone gives a clear message rather than a dozen connection errors.
+- `CI` set: they **fail** instead. A skipped test and a passing test are both
+  green, and a pipeline that quietly stopped exercising the SQL would report
+  success while testing nothing.
 
 Migrations are applied by the test fixture, so no separate step is needed.
+
+---
 
 ## Configuration
 
