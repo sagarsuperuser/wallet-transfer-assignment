@@ -335,9 +335,17 @@ transaction without a savepoint.
 
 **There is no per-request deadline**, and it is worth being precise about what
 that does and does not leave exposed. `ReadTimeout`, `WriteTimeout` and
-`IdleTimeout` on the server bound the *socket*; none of them cancels the request
-context or stops the handler, so a handler that outruns `WriteTimeout` keeps
-running — and keeps holding its transaction — after the connection is closed.
+`IdleTimeout` bound the *socket*, not the handler.
+
+`WriteTimeout` in particular bounds nothing about execution: it arms a deadline
+on the connection, and when that deadline passes nothing happens, because
+nothing is being written. It bites only when the handler finally attempts its
+write, which fails, closing the connection. Measured with a two-second
+`WriteTimeout` and a handler that wanted six: the handler ran all six, its
+request context was never cancelled, and the client waited the full six seconds
+before seeing an `EOF`. Since a transfer runs entirely inside one transaction,
+that means `WriteTimeout` never bounds how long the wallet rows stay locked — it
+only decides whether the response is still deliverable afterwards.
 
 What bounds a request today is narrower but covers the cases this design
 actually produces:
