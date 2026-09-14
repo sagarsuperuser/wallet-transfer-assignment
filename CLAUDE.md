@@ -57,7 +57,7 @@ both wallet rows — revised, because `FOR UPDATE` deadlocks against the
 in the design note.
 Reading and writing inside the same lock means the balance checked is the
 balance written against — no read-then-write race, no retry loop. Optimistic
-versioning degrades worst under exactly the contention a wallet system produces.
+locking degrades worst under exactly the contention a wallet system produces.
 
 **3. Idempotency by unique constraint.** `UNIQUE` on
 `transfers.idempotency_key`, claimed with
@@ -92,7 +92,7 @@ One transaction for the whole transfer:
    and 5 above, and "Lock mode and ordering" in the design note.
 3. Insufficient funds → mark `FAILED`, commit, return 422.
 4. Update both balances with `balance = balance ± $amount` (relative, never
-   absolute — the arithmetic belongs in the database where it's serialised).
+   absolute — the arithmetic belongs in the database where it's serialized).
 5. Insert both ledger entries.
 6. Mark `PROCESSED`. Commit.
 

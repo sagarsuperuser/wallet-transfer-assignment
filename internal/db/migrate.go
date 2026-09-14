@@ -29,7 +29,7 @@ const unlockTimeout = 5 * time.Second
 // migration runs in its own transaction alongside the row recording it, so a
 // failure leaves neither a half-applied schema nor a false record of success.
 //
-// A session-level advisory lock serialises concurrent callers, so several
+// A session-level advisory lock serializes concurrent callers, so several
 // service instances starting at once cannot race each other.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, source fs.FS) error {
 	conn, err := pool.Acquire(ctx)

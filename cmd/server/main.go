@@ -53,7 +53,7 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 
 	// Migrating on boot keeps a single command runnable from a clean checkout.
-	// It is safe with several instances starting at once: Migrate serialises
+	// It is safe with several instances starting at once: Migrate serializes
 	// them with an advisory lock and records what it applied.
 	if err := db.Migrate(ctx, pool, migrations.FS); err != nil {
 		return err

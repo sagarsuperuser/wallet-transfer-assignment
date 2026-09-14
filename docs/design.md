@@ -10,10 +10,10 @@ Move money between two wallets such that the transfer is atomic, recorded as a
 balanced double-entry pair, safe under concurrent debits of the same wallet, and
 **exactly-once at the API level** when the caller supplies an `idempotencyKey`.
 
-The hard part is not the arithmetic. It is that the caller may send the same
-request twice, the network may lose a response after the money has already
-moved, and two requests may race for the same balance. Each of those has to
-produce one and only one transfer.
+The hard part is not the arithmetic. It is duplicate delivery, partial
+execution and race conditions: the caller may send the same request twice, the
+network may lose a response after the money has already moved, and two requests
+may race for the same balance. Each has to produce one and only one transfer.
 
 ## Scope
 
@@ -174,13 +174,13 @@ conflicting claim the generated id is simply discarded.
 
 **The strategy is pessimistic row-level locking.** Both wallet rows are locked
 before the balance is read, so the balance checked is the balance written
-against. Optimistic versioning was rejected: it degrades worst under exactly the
+against. Optimistic locking was rejected: it degrades worst under exactly the
 contention a wallet produces, and it needs a retry loop.
 
 One transaction covers the whole transfer, at `READ COMMITTED` — PostgreSQL's
 default, and sufficient *because* of those locks. Every balance read happens
-under `FOR NO KEY UPDATE`, so there is no read-then-write window for a stronger
-isolation level to protect. `SERIALIZABLE` would add serialization
+under `FOR NO KEY UPDATE`, so the read-then-write race a stronger isolation
+level would protect against cannot arise. `SERIALIZABLE` would add serialization
 failures that must be retried in a loop, which is strictly more machinery for a
 guarantee the locks already provide.
 
@@ -296,7 +296,7 @@ wallet produces depends on whether the idempotency key was free.
 
 | Failure | Behaviour |
 |---|---|
-| Duplicate request, same parameters | Original transfer returned; no second transfer, no second ledger pair |
+| Duplicate request, same parameters | Original transfer returned; deduplicated by the unique constraint, so no second transfer and no second ledger pair |
 | Duplicate request, different parameters | `409`; the stored transfer is untouched |
 | Response lost after commit | Retry replays the committed transfer — the reason the key is claimed in the same transaction that moves the money |
 | Process crashes mid-transfer | Transaction rolls back; key unclaimed; no partial ledger; safe to retry |
@@ -332,14 +332,15 @@ narrow.
 
 ## Retry behaviour
 
-`503` and `500` are retryable with the **same** key — that is what the key is
-for. `400`, `404`, and `409` are terminal; retrying changes nothing. `422` is
+Every operation here is retry-safe with the **same** key — that is what the key
+is for. `503` and `500` should be retried. `400`, `404`, and `409` are terminal; retrying changes nothing. `422` is
 terminal for that key: the transfer failed and will keep reporting that it
 failed. Retrying the *intent* requires a new key.
 
 ## Indexes
 
-Everything is reached by an index that already exists for another reason:
+Index usage: everything is reached by an index that already exists for another
+reason.
 
 - `wallets` and `transfers`, by primary key.
 - `transfers`, also by `idempotency_key` — its `UNIQUE` constraint is a B-tree
@@ -447,10 +448,10 @@ Behaviour covered:
 - unknown wallet: `404`, nothing written, key left unclaimed
 - known key naming an unknown wallet: `409` rather than `404`, since the
   claim never reaches the foreign key
-- concurrent debits of one wallet: no double spend, no negative balance
+- concurrent debits of one wallet: no double spending, no negative balance
 - invariant: every wallet's stored balance equals the sum of its ledger entries
 
-Assertions are behavioural — balances, entries, states, status codes — not
+Assertions are behavioral — balances, entries, states, status codes — not
 assertions about which queries ran.
 
 ### Schema verification

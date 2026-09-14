@@ -135,7 +135,7 @@ its rejected alternative, in [`docs/design.md`](docs/design.md).
 cmd/server         HTTP server
 cmd/migrate        applies migrations and exits
 migrations/        schema, embedded in the binary
-internal/handler   HTTP only: parse, map outcomes to status codes
+internal/handler   thin handlers: parse, map outcomes to status codes, no logic
 internal/service   business logic, orchestration, transaction boundaries
 internal/repository every SQL statement; translates driver errors to domain errors
 internal/domain    entities, state transitions, validation rules
