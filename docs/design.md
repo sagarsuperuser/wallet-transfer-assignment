@@ -163,6 +163,17 @@ part of what is being fingerprinted. A replay whose hash differs
 from the stored one returns `409`: the alternative, returning a transfer the
 caller did not ask for, is worse than an error.
 
+**No separate idempotency table.** ASSIGNMENT.md suggests an
+`idempotency_records` table; the key is a `UNIQUE` column on `transfers` instead.
+Every column such a table would hold is already on that row, and the response is
+derivable from it, so a separate table adds a write per request and a second row
+to keep consistent without adding a fact. It also makes the claim and the
+transfer the same insert, so neither can exist without the other. The costs are
+real: error responses are not idempotent, because a request that produced no
+transfer claims no key, and keys cannot be expired separately from transfers,
+which are never deleted. A second endpoint needing idempotency is the point to
+build it.
+
 **Namespace: global.** There is no authentication in scope, so a key is unique
 across the whole service. The consequence is real and worth stating: two
 independent callers who both choose `"abc123"` collide, and the second receives
