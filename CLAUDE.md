@@ -9,6 +9,14 @@ before proposing anything.
 Scoped at **3–5 hours**. Every design decision has to be defensible in a review
 discussion afterwards, so reasoning matters more than volume of code.
 
+> This file records the decisions made **before** implementation. Several were
+> revised afterwards — the schema and the lock ordering during the review that
+> preceded the code, the lock mode later, when the concurrency test found a
+> deadlock. Revisions are marked in place rather than written over, so the
+> history stays readable.
+> `migrations/0001_init.sql` and [`docs/design.md`](./docs/design.md) are
+> authoritative for what shipped.
+
 ## Working agreement
 
 - **I decide, you implement.** The design decisions below are made. Challenge
@@ -43,7 +51,10 @@ Handlers stay thin. Repositories don't decide anything.
 merely prevented by application logic. The ledger remains the audit record, and
 a test asserts stored balance equals the sum of ledger entries.
 
-**2. Pessimistic locking.** `SELECT ... FOR UPDATE` on both wallet rows.
+**2. Pessimistic locking.** ~~`SELECT ... FOR UPDATE`~~ `FOR NO KEY UPDATE` on
+both wallet rows — revised, because `FOR UPDATE` deadlocks against the
+`FOR KEY SHARE` lock the claim's foreign keys take. See "Lock mode and ordering"
+in the design note.
 Reading and writing inside the same lock means the balance checked is the
 balance written against — no read-then-write race, no retry loop. Optimistic
 versioning degrades worst under exactly the contention a wallet system produces.
@@ -64,8 +75,10 @@ rolled back — idempotency requires the same key to produce the same answer, so
 retry must see the original failure. Transitions are guarded:
 `WHERE id = $1 AND state = 'PENDING'`.
 
-**5. Lock ordering.** Wallet rows are locked `ORDER BY id`, so two transfers in
-opposite directions between the same pair can't form a lock cycle. Self-transfer
+**5. Lock ordering.** Wallet rows are locked in ascending id order, so two
+transfers in opposite directions between the same pair can't form a lock cycle.
+~~`ORDER BY id`~~ — revised to sorting in Go and locking with two statements, so
+the order is a property of the code rather than of the query plan. Self-transfer
 is rejected by a `CHECK` constraint and in the domain layer.
 
 ## Transaction shape
@@ -74,7 +87,9 @@ One transaction for the whole transfer:
 
 1. Claim the idempotency key (`ON CONFLICT DO NOTHING RETURNING id`).
    No row → read the existing transfer and return it, without taking wallet locks.
-2. `SELECT ... FROM wallets WHERE id IN ($from,$to) ORDER BY id FOR UPDATE`
+2. ~~`SELECT ... FROM wallets WHERE id IN ($from,$to) ORDER BY id FOR UPDATE`~~
+   Revised to two `FOR NO KEY UPDATE` statements, sorted in Go — see decisions 2
+   and 5 above, and "Lock mode and ordering" in the design note.
 3. Insufficient funds → mark `FAILED`, commit, return 422.
 4. Update both balances with `balance = balance ± $amount` (relative, never
    absolute — the arithmetic belongs in the database where it's serialised).
@@ -82,6 +97,13 @@ One transaction for the whole transfer:
 6. Mark `PROCESSED`. Commit.
 
 ## Schema
+
+> Revised during implementation. `migrations/0001_init.sql` is what shipped; it
+> narrows the ledger key to `UNIQUE (transfer_id, type)` so a transfer cannot
+> carry two debits, names every constraint because the handler reads
+> `transfers_from_wallet_fk` off a `23503` to decide which wallet to name in a
+> `404`, adds a `CHECK` making `failure_reason` present exactly when the state is
+> `FAILED`, and drops the speculative index on `transfers`.
 
 ```sql
 CREATE TABLE wallets (

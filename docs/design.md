@@ -174,7 +174,7 @@ conflicting claim the generated id is simply discarded.
 
 One transaction covers the whole transfer. `READ COMMITTED`, PostgreSQL's
 default, is sufficient because correctness comes from row locks rather than from
-isolation: every balance read happens under `FOR UPDATE`, so there is no
+isolation: every balance read happens under `FOR NO KEY UPDATE`, so there is no
 read-then-write window to protect. `SERIALIZABLE` would add serialization
 failures that must be retried in a loop, which is strictly more machinery for a
 guarantee the locks already provide.
