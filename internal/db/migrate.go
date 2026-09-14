@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -14,6 +15,11 @@ import (
 // migrationLockID namespaces the advisory lock Migrate takes. Any constant
 // works as long as it is unique within the database; this one is arbitrary.
 const migrationLockID int64 = 8274135
+
+// unlockTimeout bounds the advisory unlock that runs as Migrate unwinds. It is
+// short because the statement is trivial, and bounded so a wedged connection
+// cannot hold up a shutdown that is already in progress.
+const unlockTimeout = 5 * time.Second
 
 // Migrate applies every unapplied migration in source, in lexical filename
 // order, and records each one so a second call is a no-op.
@@ -36,8 +42,21 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, source fs.FS) error {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	defer func() {
-		// Best effort: releasing the connection would drop the lock regardless.
-		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockID)
+		// Unlocked on a context of its own, because ctx may be the reason we are
+		// unwinding: pgx sends nothing on a cancelled context, so reusing it here
+		// would skip the unlock entirely.
+		//
+		// Releasing the connection does not cover for that. An advisory lock is
+		// session-scoped and Release returns the connection to the pool rather
+		// than closing it, so the lock rides back into the pool still held. Today
+		// every caller exits the process when a migration fails, and the dying
+		// connection is what actually frees the lock — but a caller that
+		// cancelled and kept running would leave it held, and the next migration
+		// on a different connection would wait for it forever.
+		unlockCtx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
+		defer cancel()
+
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationLockID)
 	}()
 
 	if _, err := conn.Exec(ctx, `
