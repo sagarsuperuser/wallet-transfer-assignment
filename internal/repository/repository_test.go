@@ -548,18 +548,28 @@ func TestConcurrentClaimsOfOneKeyBlockRatherThanRace(t *testing.T) {
 	go func() {
 		firstDone <- store.WithTx(ctx, func(ctx context.Context, tx *repository.Tx) error {
 			_, won, err := tx.ClaimTransfer(ctx, first)
+
+			// Signalled on every path, including failure. Closing this only on
+			// success would leave the test blocked below rather than failing,
+			// and a test that hangs is worse than one that fails.
+			close(claimHeld)
+
 			if err != nil {
 				return err
 			}
 			if !won {
 				return errors.New("the first request failed to claim a free key")
 			}
-			close(claimHeld)
 			<-releaseFirst
 			return nil // committing
 		})
 	}()
-	<-claimHeld
+
+	select {
+	case <-claimHeld:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first request never reached its claim")
+	}
 
 	type outcome struct {
 		won      bool
