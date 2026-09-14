@@ -363,14 +363,42 @@ unindexed until a reader exists.
 ## Consistency expectations
 
 - The ledger always balances: every transfer has exactly one `DEBIT` and one
-  `CREDIT` of equal amount, enforced by `UNIQUE (transfer_id, type)` and by
-  writing both entries in the transfer's own transaction.
+  `CREDIT` of equal amount, on its own two wallets. This one is enforced by
+  construction rather than by the schema — see [below](#the-ledger-invariant).
 - A wallet's stored balance always equals the sum of its ledger entries. Stored
   balance is the operational value; the ledger is the audit record. A test
   asserts they agree.
 - No ledger entry can exist without its transfer (foreign key), and no transfer
   can reference a wallet that does not exist (foreign key).
 - A transfer is `FAILED` if and only if it carries a `failure_reason`.
+
+### The ledger invariant
+
+Worth being exact about, because it is the one guarantee here the database does
+not fully hold. `UNIQUE (transfer_id, type)` stops a transfer carrying two
+`DEBIT` rows or two `CREDIT` rows — which is why the key excludes `wallet_id` —
+but it says nothing about absence. These are all storable:
+
+- a `PROCESSED` transfer with no ledger entries at all
+- a transfer with only a `DEBIT`
+- a `DEBIT` of 100 against a `CREDIT` of 7
+- both entries on a wallet the transfer never mentions
+
+What actually holds the invariant is `domain.LedgerEntriesFor`, which builds both
+entries from one transfer — both amounts from the same field, both wallets from
+the transfer's own — so there is no code path that can produce an unbalanced
+pair. They are written in the transfer's transaction, and
+`TestStoredBalanceAlwaysEqualsTheLedger` checks stored balances against the
+ledger across a run of transfers including a failed one.
+
+Closing the gap in the database would take a constraint trigger, deferred to
+commit time because the ledger is legitimately half-written between the two
+inserts. That is left out deliberately. Every other guarantee here is a
+declarative constraint — `CHECK`, `UNIQUE`, `FOREIGN KEY` — visible in the schema
+and free to reason about. A trigger is procedural code that happens to live in
+the database: invisible from the Go side, running on every transfer, needing
+tests of its own. At this scope the line is drawn at what a constraint can
+express, and this invariant is past it.
 
 ## Observability
 

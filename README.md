@@ -1,9 +1,15 @@
 # Wallet Transfer Service
 
 A wallet-to-wallet transfer API in Go and PostgreSQL, built so that **every
-guarantee that can be enforced by the database is enforced there**. Idempotency
-is a `UNIQUE` constraint, not a check-then-insert. An overdraft is a `CHECK`, not
-an `if`. A balanced ledger is `UNIQUE (transfer_id, type)`, not a convention.
+guarantee a constraint can express is expressed as a constraint**. Idempotency is
+a `UNIQUE` constraint, not a check-then-insert. An overdraft is a `CHECK`, not an
+`if`. A second debit on one transfer is `UNIQUE (transfer_id, type)`, not a
+convention.
+
+The one invariant that needs more than a constraint — that a transfer's two
+ledger entries are both present and balanced — is held by construction in the
+domain instead, and [`docs/design.md`](docs/design.md) says exactly where the
+schema stops.
 
 The full design — API contract, transaction shape, failure modes, and for each
 decision the alternative that was rejected — is in

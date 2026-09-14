@@ -8,8 +8,9 @@
 --     (a violation aborts the transaction, so it cannot be the primary path).
 --   * transfers.idempotency_key is UNIQUE. That constraint, not application
 --     code, is what arbitrates concurrent requests carrying the same key.
---   * A transfer produces exactly two ledger entries, one DEBIT and one CREDIT,
---     enforced by UNIQUE (transfer_id, type).
+--   * A transfer produces exactly two ledger entries, one DEBIT and one CREDIT.
+--     UNIQUE (transfer_id, type) stops a second of either side; the pair being
+--     complete and balanced is held by the domain, not by the schema.
 
 CREATE TABLE wallets (
     id         TEXT        PRIMARY KEY,
@@ -56,7 +57,10 @@ CREATE TABLE ledger_entries (
     amount      BIGINT      NOT NULL CONSTRAINT ledger_entries_amount_positive CHECK (amount > 0),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Exactly one DEBIT and one CREDIT per transfer. Also serves as the
+    -- At most one DEBIT and at most one CREDIT per transfer. It does not
+    -- require both to exist, nor that their amounts agree with the transfer:
+    -- that is held by domain.LedgerEntriesFor, which builds the pair from one
+    -- transfer. See "The ledger invariant" in docs/design.md. Also serves as the
     -- transfer_id-leading index for reading a transfer's entries.
     CONSTRAINT ledger_entries_one_per_transfer_side UNIQUE (transfer_id, type)
 );
