@@ -424,8 +424,21 @@ assertions about which queries ran.
 
 ### Schema verification
 
-The migration's constraints were verified against a live database rather than
-assumed: 16 assertions, each attempting a write the schema must reject and
-checking the SQLSTATE and constraint name produced. All 16 pass. The migration
-is idempotent across repeated runs, and `lock_timeout` was measured firing at
-3.02s under real row contention.
+`TestSchemaRejectsInvalidWrites` attempts, one at a time, every write the schema
+is supposed to make impossible — 16 assertions, each checking the SQLSTATE *and*
+the constraint name produced.
+
+Most of those constraints are backstops the application never reaches: the
+domain rejects a negative amount or a self-transfer long before SQL sees it. That
+is precisely why they need a test of their own, since nothing else in the suite
+would notice one being weakened. Three schema mutations confirm it does: renaming
+`transfers_from_wallet_fk`, widening `UNIQUE (transfer_id, type)` to include
+`wallet_id`, and dropping the `failure_reason` check each fail it.
+
+Asserting the constraint *names* is deliberate. They are contract — the handler
+reads `transfers_from_wallet_fk` off a `23503` to decide which wallet to name in
+a `404`, so renaming one in a migration would quietly turn that `404` into a
+`500`. Nothing else holds that coupling.
+
+The migration is idempotent across repeated runs, and `lock_timeout` was measured
+firing at 3.02s under real row contention.
