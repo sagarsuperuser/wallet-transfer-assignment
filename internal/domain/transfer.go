@@ -8,7 +8,13 @@ import (
 	"time"
 )
 
-// MaxIdempotencyKeyLength bounds a key so a caller cannot store unbounded text.
+// MaxIdempotencyKeyLength bounds a key so a caller cannot store unbounded text
+// in an indexed column.
+//
+// Measured in bytes, not characters, because the limit is about storage: 255
+// CJK characters occupy 765 bytes, and counting runes would let them past a
+// limit whose purpose is to cap what gets stored. Validation uses len() for the
+// same reason, and the error message says bytes.
 const MaxIdempotencyKeyLength = 255
 
 // FailureReasonInsufficientFunds is recorded on a transfer whose source wallet

@@ -76,7 +76,7 @@ func (s *Transfers) Create(ctx context.Context, request domain.TransferRequest) 
 		return err
 	})
 	if err != nil {
-		s.logFailure(ctx, request, pending.ID, time.Since(started), err)
+		s.logFailure(ctx, request, time.Since(started), err)
 		return Result{}, err
 	}
 
@@ -200,10 +200,15 @@ func (s *Transfers) logOutcome(ctx context.Context, result Result, elapsed time.
 }
 
 // logFailure records a request that produced no transfer.
+//
+// No transfer id: the one generated before the claim may name a row that was
+// never written — a validation failure, an unknown wallet, or a claim that lost.
+// On a key conflict a transfer does exist, but with a different id, so logging
+// the generated one would point at a UUID that never existed. The idempotency
+// key is the useful handle anyway, since it is what the caller holds.
 func (s *Transfers) logFailure(
 	ctx context.Context,
 	request domain.TransferRequest,
-	transferID string,
 	elapsed time.Duration,
 	err error,
 ) {
@@ -222,7 +227,6 @@ func (s *Transfers) logFailure(
 	}
 
 	s.logger.Log(ctx, level, "transfer failed",
-		slog.String("transfer_id", transferID),
 		slog.String("idempotency_key", request.IdempotencyKey),
 		slog.String("from_wallet_id", request.FromWalletID),
 		slog.String("to_wallet_id", request.ToWalletID),

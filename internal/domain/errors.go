@@ -34,7 +34,7 @@ var (
 		Field: "idempotencyKey", Message: "idempotencyKey is required"}
 	ErrIdempotencyKeyTooLong = &ValidationError{
 		Field:   "idempotencyKey",
-		Message: fmt.Sprintf("idempotencyKey must be at most %d characters", MaxIdempotencyKeyLength)}
+		Message: fmt.Sprintf("idempotencyKey must be at most %d bytes", MaxIdempotencyKeyLength)}
 	ErrMissingFromWallet = &ValidationError{
 		Field: "fromWalletId", Message: "fromWalletId is required"}
 	ErrMissingToWallet = &ValidationError{

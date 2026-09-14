@@ -19,22 +19,28 @@ decision the alternative that was rejected — is in
 
 Requires Go 1.24+ and Docker.
 
+Start PostgreSQL and apply the schema:
+
 ```bash
 docker compose up -d --wait
 export DATABASE_URL='postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable'
-go run ./cmd/server
+go run ./cmd/migrate
 ```
 
-The server migrates on boot and listens on `:8080`.
-
-Wallets are assumed to exist — nothing in scope creates one — so seed a couple:
+Wallets are assumed to exist — nothing in scope creates one — so seed a couple
+before starting the service, while you still have a prompt:
 
 ```bash
 psql "$DATABASE_URL" -c "INSERT INTO wallets (id, balance) VALUES
   ('wallet_1', 1000), ('wallet_2', 0);"
 ```
 
-Then move some money:
+Now run the service. It migrates on boot, listens on `:8080`, and stays in the
+foreground until you stop it, so run the `curl` below from another terminal:
+
+```bash
+go run ./cmd/server
+```
 
 ```bash
 curl -i -X POST localhost:8080/transfers \

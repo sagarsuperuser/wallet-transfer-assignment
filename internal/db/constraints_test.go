@@ -97,6 +97,13 @@ func TestSchemaRejectsInvalidWrites(t *testing.T) {
 			constraint: "transfers_failure_reason_matches_state",
 		},
 		{
+			name:       "a failed transfer's reason cannot be blank",
+			statement:  transferInsert(100, "FAILED", ptr("   ")),
+			args:       transferArgs(source, destination),
+			sqlstate:   sqlstateCheckViolation,
+			constraint: "transfers_failure_reason_matches_state",
+		},
+		{
 			name:       "a processed transfer must not carry a reason",
 			statement:  transferInsert(100, "PROCESSED", ptr("insufficient funds")),
 			args:       transferArgs(source, destination),

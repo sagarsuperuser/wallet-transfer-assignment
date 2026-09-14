@@ -60,7 +60,7 @@ Validation, all producing `400`:
 
 | Field | Rule |
 |---|---|
-| `idempotencyKey` | required, non-empty, at most 255 characters |
+| `idempotencyKey` | required, non-empty, at most 255 **bytes** (the limit caps storage, so it counts bytes rather than characters) |
 | `fromWalletId` | required, non-empty |
 | `toWalletId` | required, non-empty, different from `fromWalletId` |
 | `amount` | required, integer, greater than zero |
@@ -451,7 +451,7 @@ assertions about which queries ran.
 ### Schema verification
 
 `TestSchemaRejectsInvalidWrites` attempts, one at a time, every write the schema
-is supposed to make impossible — 16 assertions, each checking the SQLSTATE *and*
+is supposed to make impossible — 17 assertions, each checking the SQLSTATE *and*
 the constraint name produced.
 
 Most of those constraints are backstops the application never reaches: the

@@ -43,9 +43,11 @@ CREATE TABLE transfers (
 
     CONSTRAINT transfers_distinct_wallets CHECK (from_wallet_id <> to_wallet_id),
 
-    -- A failure always carries a reason; a non-failure never does.
+    -- A failure always carries a reason; a non-failure never does. Blank counts
+    -- as absent: '' is not NULL, so without the trim a FAILED transfer could
+    -- satisfy this while explaining nothing.
     CONSTRAINT transfers_failure_reason_matches_state CHECK (
-        (state = 'FAILED') = (failure_reason IS NOT NULL)
+        (state = 'FAILED') = (failure_reason IS NOT NULL AND btrim(failure_reason) <> '')
     )
 );
 
