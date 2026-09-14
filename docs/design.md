@@ -172,10 +172,15 @@ conflicting claim the generated id is simply discarded.
 
 ## Transaction and concurrency
 
-One transaction covers the whole transfer. `READ COMMITTED`, PostgreSQL's
-default, is sufficient because correctness comes from row locks rather than from
-isolation: every balance read happens under `FOR NO KEY UPDATE`, so there is no
-read-then-write window to protect. `SERIALIZABLE` would add serialization
+**The strategy is pessimistic row-level locking.** Both wallet rows are locked
+before the balance is read, so the balance checked is the balance written
+against. Optimistic versioning was rejected: it degrades worst under exactly the
+contention a wallet produces, and it needs a retry loop.
+
+One transaction covers the whole transfer, at `READ COMMITTED` — PostgreSQL's
+default, and sufficient *because* of those locks. Every balance read happens
+under `FOR NO KEY UPDATE`, so there is no read-then-write window for a stronger
+isolation level to protect. `SERIALIZABLE` would add serialization
 failures that must be retried in a loop, which is strictly more machinery for a
 guarantee the locks already provide.
 
@@ -198,7 +203,7 @@ guarantee the locks already provide.
 
 Correctness comes from holding the row lock across the read and the write. The
 relative `UPDATE` is defensive style on top of that, not the thing that makes it
-safe — under `FOR UPDATE` an absolute write would be equally correct.
+safe — under the row lock an absolute write would be equally correct.
 
 ### Lock mode and ordering
 
@@ -298,7 +303,7 @@ wallet produces depends on whether the idempotency key was free.
 | Insufficient funds | `FAILED` committed, `422`, no money moved, same answer on every replay |
 | Unknown wallet, key free | `404`; nothing written, key left unclaimed. If both wallets are unknown only `fromWalletId` is named |
 | Unknown wallet, key already held | `409` — the claim inserts no row, so the foreign key is never validated and the hash mismatch answers first |
-| Concurrent debits of one wallet | Serialised by `FOR UPDATE`; the second sees the first's balance |
+| Concurrent debits of one wallet | Serialised by the row lock; the second sees the first's balance |
 | Contention exceeds `lock_timeout` | `55P03` → `503`; safe to retry unchanged |
 | Lock upgrade from the foreign key's `FOR KEY SHARE` | Prevented by locking with `FOR NO KEY UPDATE`; `FOR UPDATE` deadlocks under concurrent transfers on one wallet |
 | Overdraft attempted despite the check | `CHECK (balance >= 0)` aborts the transaction → `500`. Unreachable by design; the constraint exists so a logic bug corrupts nothing |
